@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#08111f" />
+  <title>Trekker Safety Monitor</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">KRISHNA · SUKHDEV · MAHIR</div>
+        <h1>Trekker Safety Monitor</h1>
+        <p class="subtitle">Live LoRa telemetry through the ESP32 base station</p>
+      </div>
+      <div class="actions">
+        <button id="connectBtn" class="primary">Connect Base ESP32</button>
+        <button id="demoBtn" class="secondary">Demo</button>
+      </div>
+    </header>
+
+    <section class="statusbar">
+      <div class="status-item">
+        <span id="statusDot" class="dot offline"></span>
+        <span id="connectionText">Disconnected</span>
+      </div>
+      <div class="status-item">Last update: <strong id="lastUpdate">—</strong></div>
+      <div class="status-item">Packets: <strong id="packetCount">0</strong></div>
+    </section>
+
+    <section id="fallBanner" class="fall-banner hidden">
+      <div>
+        <strong>FALL DETECTED</strong>
+        <span>The trekker unit has latched an impact alert.</span>
+      </div>
+      <div class="pulse-ring"></div>
+    </section>
+
+    <main class="grid">
+      <section class="card hero-card">
+        <div class="card-head">
+          <span>Safety status</span>
+          <span id="safetyPill" class="pill good">NORMAL</span>
+        </div>
+        <div class="hero-value" id="heartRate">—</div>
+        <div class="hero-unit">BPM</div>
+        <div class="mini-row">
+          <div><span>Finger</span><strong id="fingerState">No signal</strong></div>
+          <div><span>Impact</span><strong id="accelMag">— g</strong></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><span>Environment</span><span class="icon">◌</span></div>
+        <div class="metric-list">
+          <div><span>Temperature</span><strong id="temperature">— °C</strong></div>
+          <div><span>Pressure</span><strong id="pressure">— hPa</strong></div>
+          <div><span>Barometric altitude</span><strong id="altitude">— m</strong></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><span>LoRa link</span><span class="icon">⌁</span></div>
+        <div class="signal-wrap">
+          <div class="signal-value" id="rssi">—</div>
+          <div class="signal-unit">dBm RSSI</div>
+        </div>
+        <div class="metric-list compact">
+          <div><span>SNR</span><strong id="snr">— dB</strong></div>
+          <div><span>Link quality</span><strong id="linkQuality">—</strong></div>
+        </div>
+      </section>
+
+      <section class="card wide">
+        <div class="card-head"><span>Motion</span><span class="muted">MPU6500</span></div>
+        <div class="motion-grid">
+          <div class="axis-group">
+            <h3>Accelerometer</h3>
+            <div><span>X</span><strong id="ax">—</strong><small>g</small></div>
+            <div><span>Y</span><strong id="ay">—</strong><small>g</small></div>
+            <div><span>Z</span><strong id="az">—</strong><small>g</small></div>
+          </div>
+          <div class="axis-group">
+            <h3>Gyroscope</h3>
+            <div><span>X</span><strong id="gx">—</strong><small>°/s</small></div>
+            <div><span>Y</span><strong id="gy">—</strong><small>°/s</small></div>
+            <div><span>Z</span><strong id="gz">—</strong><small>°/s</small></div>
+          </div>
+          <div class="chart-box">
+            <div class="chart-title">Acceleration magnitude</div>
+            <canvas id="accelChart" width="640" height="170"></canvas>
+          </div>
+        </div>
+      </section>
+
+      <section class="card wide gps-card">
+        <div class="card-head">
+          <span>Location</span>
+          <span id="gpsPill" class="pill warn">NO FIX</span>
+        </div>
+        <div class="gps-layout">
+          <div>
+            <div class="coords" id="coordinates">Waiting for GPS fix</div>
+            <div class="metric-list compact gps-meta">
+              <div><span>Satellites</span><strong id="satellites">0</strong></div>
+            </div>
+          </div>
+          <button id="mapBtn" class="secondary" disabled>Open Map</button>
+        </div>
+      </section>
+
+      <section class="card wide raw-card">
+        <div class="card-head"><span>Raw telemetry</span><span class="muted">Latest packet</span></div>
+        <pre id="rawPacket">Waiting for telemetry…</pre>
+      </section>
+    </main>
+
+    <footer>
+      ESP32 · SX1278 433 MHz LoRa · BLE · MPU6500 · BMP280 · MAX3010x · GPS
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
