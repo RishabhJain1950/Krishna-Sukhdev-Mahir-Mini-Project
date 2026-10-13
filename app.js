@@ -14,11 +14,14 @@ let bluetoothDevice = null;
 let telemetryCharacteristic = null;
 let rxBuffer = '';
 let packetCount = 0;
+let notificationCount = 0;
 let latestLat = null;
 let latestLon = null;
 let demoTimer = null;
-const decoder = new TextDecoder();
+let telemetryWatchdog = null;
+let lastNotificationAt = 0;
 
+const decoder = new TextDecoder();
 const history = Array(70).fill(1);
 const canvas = document.getElementById('accelChart');
 const ctx = canvas.getContext('2d');
@@ -47,7 +50,8 @@ function numeric(value, fallback = null) {
 }
 
 function text(id, value) {
-  document.getElementById(id).textContent = value;
+  const el = document.getElementById(id);
+  if (el) el.textContent = value;
 }
 
 function fmt(value, digits = 1, suffix = '') {
@@ -64,13 +68,16 @@ function linkQuality(rssi, snr) {
 }
 
 function updateDashboard(packet) {
-  if (!packet.includes('=')) return;
+  packet = packet.trim();
+
+  // A valid trekker packet always starts with AX= and contains several fields.
+  if (!packet.includes('AX=') || !packet.includes('AM=')) return;
 
   const d = parsePacket(packet);
   const fall = d.F === '1';
   const gpsFix = d.GPS === '1';
+  const fingerDetected = d.FINGER !== undefined ? d.FINGER === '1' : numeric(d.IR, 0) >= 5000;
   const hr = numeric(d.HR, 0);
-  const ir = numeric(d.IR, 0);
   const accel = numeric(d.AM, 0);
   const rssi = numeric(d.RSSI);
   const snr = numeric(d.SNR);
@@ -81,7 +88,7 @@ function updateDashboard(packet) {
   rawPacketEl.textContent = packet;
 
   text('heartRate', hr > 0 ? Math.round(hr) : '—');
-  text('fingerState', ir > 50000 ? 'Detected' : 'No signal');
+  text('fingerState', fingerDetected ? 'Detected' : 'No signal');
   text('accelMag', `${accel.toFixed(2)} g`);
 
   text('temperature', fmt(d.T, 1, ' °C'));
@@ -111,7 +118,7 @@ function updateDashboard(packet) {
     latestLon = numeric(d.LON);
     gpsPill.textContent = 'FIXED';
     gpsPill.className = 'pill good';
-    text('coordinates', `${Number(d.LAT).toFixed(6)}, ${Number(d.LON).toFixed(6)}`);
+    text('coordinates', `${numeric(d.LAT, 0).toFixed(6)}, ${numeric(d.LON, 0).toFixed(6)}`);
     text('satellites', d.SAT ?? '0');
     mapBtn.disabled = latestLat === null || latestLon === null;
   } else {
@@ -158,8 +165,24 @@ function drawChart() {
   ctx.stroke();
 }
 
-function onNotification(event) {
-  rxBuffer += decoder.decode(event.target.value);
+function consumeBleText(chunk) {
+  notificationCount += 1;
+  lastNotificationAt = Date.now();
+
+  // Every packet begins with AX=. If a new packet starts before we saw the
+  // previous newline, discard the damaged partial packet and resynchronise.
+  const packetStart = chunk.indexOf('AX=');
+  if (packetStart >= 0 && rxBuffer.length > 0) {
+    rxBuffer = chunk.slice(packetStart);
+  } else {
+    rxBuffer += chunk;
+  }
+
+  // Avoid an indefinitely growing buffer if a BLE notification is lost.
+  if (rxBuffer.length > 1000) {
+    const latestStart = rxBuffer.lastIndexOf('AX=');
+    rxBuffer = latestStart >= 0 ? rxBuffer.slice(latestStart) : '';
+  }
 
   let newlineIndex;
   while ((newlineIndex = rxBuffer.indexOf('\n')) >= 0) {
@@ -169,9 +192,33 @@ function onNotification(event) {
   }
 }
 
+function onNotification(event) {
+  const chunk = decoder.decode(event.target.value);
+  consumeBleText(chunk);
+}
+
+function startTelemetryWatchdog() {
+  clearInterval(telemetryWatchdog);
+  telemetryWatchdog = setInterval(() => {
+    if (!bluetoothDevice?.gatt?.connected) return;
+
+    if (lastNotificationAt === 0) {
+      setConnection(true, 'BLE connected — waiting for telemetry');
+      return;
+    }
+
+    const age = Date.now() - lastNotificationAt;
+    if (age > 4000) {
+      setConnection(true, 'BLE connected — telemetry stalled');
+    } else {
+      setConnection(true, `Live BLE telemetry · ${notificationCount} notifications`);
+    }
+  }, 1000);
+}
+
 async function connectBluetooth() {
   if (!navigator.bluetooth) {
-    alert('Web Bluetooth is not supported in this browser. Use Chrome/Edge on desktop or Chrome on Android.');
+    alert('Web Bluetooth is not supported in this browser. Use Chrome/Edge on Windows/macOS/Linux or Chrome on Android.');
     return;
   }
 
@@ -183,13 +230,18 @@ async function connectBluetooth() {
   try {
     connectBtn.disabled = true;
     connectBtn.textContent = 'Connecting…';
+    rxBuffer = '';
+    notificationCount = 0;
+    lastNotificationAt = 0;
 
     bluetoothDevice = await navigator.bluetooth.requestDevice({
-      filters: [{ name: 'Trekker-Base' }],
+      filters: [{ namePrefix: 'Trekker-Base' }],
       optionalServices: [SERVICE_UUID]
     });
 
     bluetoothDevice.addEventListener('gattserverdisconnected', () => {
+      clearInterval(telemetryWatchdog);
+      rxBuffer = '';
       setConnection(false, 'Disconnected');
       connectBtn.disabled = false;
     });
@@ -197,13 +249,25 @@ async function connectBluetooth() {
     const server = await bluetoothDevice.gatt.connect();
     const service = await server.getPrimaryService(SERVICE_UUID);
     telemetryCharacteristic = await service.getCharacteristic(TELEMETRY_UUID);
-    await telemetryCharacteristic.startNotifications();
-    telemetryCharacteristic.addEventListener('characteristicvaluechanged', onNotification);
 
-    setConnection(true, 'BLE connected to Trekker-Base');
+    telemetryCharacteristic.addEventListener('characteristicvaluechanged', onNotification);
+    await telemetryCharacteristic.startNotifications();
+
+    // Verify that the characteristic itself is readable. The base initially
+    // exposes BASE_READY; telemetry then arrives through notifications.
+    try {
+      const initialValue = await telemetryCharacteristic.readValue();
+      const initialText = decoder.decode(initialValue).trim();
+      console.log('Initial BLE value:', initialText);
+    } catch (readError) {
+      console.warn('Initial characteristic read failed, notifications may still work:', readError);
+    }
+
+    setConnection(true, 'BLE connected — waiting for telemetry');
+    startTelemetryWatchdog();
   } catch (error) {
     console.error(error);
-    setConnection(false, 'Connection cancelled / failed');
+    setConnection(false, `BLE failed: ${error.message || error}`);
   } finally {
     connectBtn.disabled = false;
   }
@@ -239,6 +303,7 @@ function startDemo() {
       `IR=68421`,
       `RED=61234`,
       `HR=${Math.round(76 + Math.sin(phase / 3) * 5)}`,
+      `FINGER=1`,
       `F=${impact ? 1 : 0}`,
       `GPS=1`,
       `LAT=19.076090`,
