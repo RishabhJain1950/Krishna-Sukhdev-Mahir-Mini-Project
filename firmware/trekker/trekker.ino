@@ -27,12 +27,20 @@ HardwareSerial GPS(2);
 
 // ---------------- State ----------------
 bool fallDetected = false;
-float heartRate = 0.0f;
-long lastBeat = 0;
 unsigned long lastTelemetry = 0;
 
 const float IMPACT_THRESHOLD = 2.5f;
 const unsigned long TELEMETRY_INTERVAL = 500;
+
+// ---------------- Heart-rate state ----------------
+long lastBeat = 0;
+float heartRate = 0.0f;
+float avgBpm = 0.0f;
+
+#define BPM_AVG_COUNT 5
+float bpmBuffer[BPM_AVG_COUNT] = {0};
+int bpmIndex = 0;
+int bpmSamples = 0;
 
 // ---------------- MPU6500 raw read ----------------
 int16_t readMPU16(uint8_t reg) {
@@ -76,15 +84,29 @@ void setup() {
   }
   Serial.println("BMP280 OK");
 
-  // MAX3010x
+  // MAX3010x - tuned settings that worked in standalone BPM test
   if (!maxSensor.begin(Wire, I2C_SPEED_FAST)) {
     Serial.println("MAX3010x FAILED");
     while (1) delay(10);
   }
-  maxSensor.setup(60, 4, 2, 100, 411, 4096);
+
+  maxSensor.setup(
+    50,      // LED brightness
+    4,       // averaging
+    2,       // RED + IR
+    400,     // sample rate
+    411,     // pulse width
+    4096     // ADC range
+  );
+
+  maxSensor.setPulseAmplitudeRed(50);
+  maxSensor.setPulseAmplitudeIR(50);
+  maxSensor.setPulseAmplitudeGreen(0);
+
   Serial.println("MAX3010x OK");
 
   // GPS: module confirmed at 9600 baud, TX connected to GPIO32
+  GPS.setRxBufferSize(1024);
   GPS.begin(9600, SERIAL_8N1, GPS_RX_PIN, -1);
   Serial.println("GPS UART OK");
 
@@ -113,7 +135,7 @@ void loop() {
     fallDetected = false;
     digitalWrite(BUZZER_PIN, LOW);
     Serial.println("FALL RESET");
-    delay(200); // simple debounce
+    delay(200);
   }
 
   // MPU6500
@@ -139,26 +161,50 @@ void loop() {
   float pressure = bmp.readPressure() / 100.0f;
   float altitude = bmp.readAltitude(1013.25f);
 
-  // MAX3010x heart-rate estimate
+  // MAX3010x tuned BPM detection
   long irValue = maxSensor.getIR();
   long redValue = maxSensor.getRed();
-  bool fingerDetected = irValue > 50000;
+  bool fingerDetected = irValue >= 5000;
 
-  if (fingerDetected && checkForBeat(irValue)) {
-    long delta = millis() - lastBeat;
-    lastBeat = millis();
+  if (!fingerDetected) {
+    heartRate = 0.0f;
+    avgBpm = 0.0f;
+    lastBeat = 0;
+    bpmIndex = 0;
+    bpmSamples = 0;
+  } else if (checkForBeat(irValue)) {
+    long now = millis();
 
-    if (delta > 0) {
-      float currentBPM = 60.0f / (delta / 1000.0f);
-      if (currentBPM > 35.0f && currentBPM < 220.0f) {
-        heartRate = (heartRate == 0.0f)
-          ? currentBPM
-          : (heartRate * 0.7f + currentBPM * 0.3f);
+    if (lastBeat != 0) {
+      long delta = now - lastBeat;
+
+      // Accept roughly 40-200 BPM
+      if (delta >= 300 && delta <= 1500) {
+        float currentBpm = 60000.0f / delta;
+
+        bpmBuffer[bpmIndex] = currentBpm;
+        bpmIndex++;
+        if (bpmIndex >= BPM_AVG_COUNT) bpmIndex = 0;
+
+        if (bpmSamples < BPM_AVG_COUNT) bpmSamples++;
+
+        float total = 0.0f;
+        for (int i = 0; i < bpmSamples; i++) {
+          total += bpmBuffer[i];
+        }
+
+        avgBpm = total / bpmSamples;
+        heartRate = avgBpm;
+
+        Serial.print("BEAT | BPM: ");
+        Serial.print(currentBpm, 1);
+        Serial.print(" | AVG: ");
+        Serial.println(avgBpm, 1);
       }
     }
-  }
 
-  if (!fingerDetected) heartRate = 0.0f;
+    lastBeat = now;
+  }
 
   // Send telemetry twice per second
   if (millis() - lastTelemetry >= TELEMETRY_INTERVAL) {
@@ -170,7 +216,7 @@ void loop() {
     int satellites = gps.satellites.isValid() ? gps.satellites.value() : 0;
 
     String packet;
-    packet.reserve(240);
+    packet.reserve(260);
 
     packet += "AX=" + String(ax, 2);
     packet += ",AY=" + String(ay, 2);
@@ -185,6 +231,7 @@ void loop() {
     packet += ",IR=" + String(irValue);
     packet += ",RED=" + String(redValue);
     packet += ",HR=" + String(heartRate, 0);
+    packet += ",FINGER=" + String(fingerDetected ? 1 : 0);
     packet += ",F=" + String(fallDetected ? 1 : 0);
     packet += ",GPS=" + String(gpsFix ? 1 : 0);
     packet += ",LAT=" + String(latitude, 6);
@@ -198,5 +245,12 @@ void loop() {
     Serial.println();
     Serial.println("===== TREKKER =====");
     Serial.println(packet);
+
+    Serial.print("GPS chars: ");
+    Serial.print(gps.charsProcessed());
+    Serial.print(" | Satellites: ");
+    Serial.print(satellites);
+    Serial.print(" | GPS fix: ");
+    Serial.println(gpsFix ? "YES" : "NO");
   }
 }
